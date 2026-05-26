@@ -11,9 +11,31 @@ type ExperienceResponse = {
   error?: string;
 };
 
+type CacheEntry = {
+  posts: ExperiencePost[];
+  status: string;
+};
+
+function cacheKey({
+  query,
+  stateCode,
+  city,
+}: {
+  query?: string;
+  stateCode?: string | null;
+  city?: string;
+}) {
+  return JSON.stringify({
+    query: query?.trim().toLowerCase() ?? "",
+    stateCode: stateCode ?? "",
+    city: city?.trim().toLowerCase() ?? "",
+  });
+}
+
 export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[] }) {
   const { selectedStateCode } = useSelectedState();
   const didAutoLoadRef = useRef<string | null>(null);
+  const cacheRef = useRef<Map<string, CacheEntry>>(new Map());
   const [searchQuery, setSearchQuery] = useState("");
   const [cityFilter, setCityFilter] = useState("");
   const [posts, setPosts] = useState<ExperiencePost[]>(initialPosts);
@@ -41,6 +63,16 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
     stateCode?: string | null;
     city?: string;
   }) {
+    const key = cacheKey({ query, stateCode, city });
+    const cached = cacheRef.current.get(key);
+
+    if (cached) {
+      setPosts(cached.posts);
+      setStatus(`${cached.status} Loaded from session cache.`);
+      setHasLoaded(true);
+      return;
+    }
+
     setIsLoading(true);
     setStatus("Searching public DMV discussions...");
 
@@ -58,11 +90,17 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
       });
 
       const data = (await response.json()) as ExperienceResponse;
-      setPosts(data.posts);
-      setStatus(
+      const nextStatus =
         data.error ??
-          `Updated with ${data.posts.length} DMV experience summaries.`,
-      );
+        `Updated with ${data.posts.length} DMV experience summaries.`;
+
+      cacheRef.current.set(key, {
+        posts: data.posts,
+        status: nextStatus,
+      });
+
+      setPosts(data.posts);
+      setStatus(nextStatus);
     } finally {
       setHasLoaded(true);
       setIsLoading(false);

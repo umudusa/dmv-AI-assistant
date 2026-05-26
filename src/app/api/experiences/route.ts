@@ -1,6 +1,7 @@
 ﻿import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { getStateByCode } from "@/config/states";
+import { createSupabaseAdminClient } from "@/lib/supabase";
 import type { ExperiencePost } from "@/types/experience";
 
 const client = new OpenAI({
@@ -13,6 +14,10 @@ type ExperienceSearchRequest = {
   city?: string;
 };
 
+type CachedExperienceResult = {
+  posts: ExperiencePost[];
+};
+
 function cleanText(text: string) {
   return text
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g, "$1")
@@ -21,27 +26,123 @@ function cleanText(text: string) {
     .trim();
 }
 
-function safeParsePosts(text: string): ExperiencePost[] {
+function extractJson(text: string) {
   const cleaned = text
     .replace(/^```json/i, "")
     .replace(/^```/i, "")
     .replace(/```$/i, "")
     .trim();
 
-  const parsed = JSON.parse(cleaned) as { posts?: ExperiencePost[] };
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
 
-  return (parsed.posts ?? []).map((post) => ({
+  if (start === -1 || end === -1) {
+    throw new Error("No JSON object found.");
+  }
+
+  return cleaned.slice(start, end + 1);
+}
+
+function normalizePosts(posts: ExperiencePost[]) {
+  return posts.map((post) => ({
     ...post,
     title: cleanText(post.title),
     body: cleanText(post.body),
     dmvLocation: post.dmvLocation ? cleanText(post.dmvLocation) : undefined,
     city: post.city ? cleanText(post.city) : undefined,
+    upvotes: Number.isFinite(post.upvotes) ? post.upvotes : 0,
+    createdAt: post.createdAt || "2026-05-25",
   }));
+}
+
+function safeParsePosts(text: string): ExperiencePost[] {
+  const parsed = JSON.parse(extractJson(text)) as { posts?: ExperiencePost[] };
+
+  return normalizePosts(parsed.posts ?? []);
+}
+
+function buildCacheQuery({
+  searchIntent,
+  stateCode,
+  city,
+}: {
+  searchIntent: string;
+  stateCode?: string | null;
+  city?: string;
+}) {
+  return {
+    query: searchIntent.trim().toLowerCase(),
+    state_code: stateCode ?? null,
+    city: city?.trim().toLowerCase() || null,
+  };
+}
+
+async function getCachedExperiences({
+  searchIntent,
+  stateCode,
+  city,
+}: {
+  searchIntent: string;
+  stateCode?: string | null;
+  city?: string;
+}) {
+  const supabase = createSupabaseAdminClient();
+
+  if (!supabase) {
+    return null;
+  }
+
+  const cacheQuery = buildCacheQuery({ searchIntent, stateCode, city });
+
+  const { data } = await supabase
+    .from("experience_search_cache")
+    .select("result_json")
+    .eq("query", cacheQuery.query)
+    .eq("state_code", cacheQuery.state_code)
+    .eq("city", cacheQuery.city)
+    .gt("expires_at", new Date().toISOString())
+    .maybeSingle();
+
+  if (!data?.result_json) {
+    return null;
+  }
+
+  return data.result_json as CachedExperienceResult;
+}
+
+async function setCachedExperiences({
+  searchIntent,
+  stateCode,
+  city,
+  posts,
+}: {
+  searchIntent: string;
+  stateCode?: string | null;
+  city?: string;
+  posts: ExperiencePost[];
+}) {
+  const supabase = createSupabaseAdminClient();
+
+  if (!supabase) {
+    return;
+  }
+
+  const cacheQuery = buildCacheQuery({ searchIntent, stateCode, city });
+
+  await supabase.from("experience_search_cache").insert({
+    query: cacheQuery.query,
+    state_code: cacheQuery.state_code,
+    city: cacheQuery.city,
+    result_json: { posts },
+    provider: "openai_web_search",
+    expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+  });
 }
 
 export async function POST(request: Request) {
   const body = (await request.json()) as ExperienceSearchRequest;
   const state = body.stateCode ? getStateByCode(body.stateCode) : undefined;
+  const stateCode = state?.code ?? body.stateCode ?? null;
   const query = body.query?.trim();
   const city = body.city?.trim();
 
@@ -61,6 +162,19 @@ export async function POST(request: Request) {
       ]
         .filter(Boolean)
         .join(" ");
+
+  const cached = await getCachedExperiences({
+    searchIntent,
+    stateCode,
+    city,
+  });
+
+  if (cached) {
+    return NextResponse.json({
+      posts: cached.posts,
+      cached: true,
+    });
+  }
 
   try {
     const response = await client.responses.create({
@@ -110,8 +224,18 @@ JSON shape:
 }`,
     });
 
+    const posts = safeParsePosts(response.output_text);
+
+    await setCachedExperiences({
+      searchIntent,
+      stateCode,
+      city,
+      posts,
+    });
+
     return NextResponse.json({
-      posts: safeParsePosts(response.output_text),
+      posts,
+      cached: false,
     });
   } catch {
     return NextResponse.json(
