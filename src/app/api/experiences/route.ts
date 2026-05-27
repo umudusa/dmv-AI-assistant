@@ -1,7 +1,6 @@
 ﻿import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { getStateByCode } from "@/config/states";
-import { createSupabaseAdminClient } from "@/lib/supabase";
 import type { ExperiencePost } from "@/types/experience";
 
 const client = new OpenAI({
@@ -11,17 +10,28 @@ const client = new OpenAI({
 type ExperienceSearchRequest = {
   query?: string;
   stateCode?: string | null;
-  city?: string;
 };
 
-type CachedExperienceResult = {
-  posts: ExperiencePost[];
+type SearchResult = {
+  title: string;
+  snippet: string;
+};
+
+type AiExperienceResult = {
+  searchedStateCode?: string | null;
+  searchedCity?: string | null;
+  posts?: ExperiencePost[];
 };
 
 function cleanText(text: string) {
   return text
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g, "$1")
-    .replace(/https?:\/\/\S+/g, "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -43,208 +53,191 @@ function extractJson(text: string) {
   return cleaned.slice(start, end + 1);
 }
 
-function normalizePosts(posts: ExperiencePost[]) {
+function normalizePosts(posts: ExperiencePost[], stateCode: string) {
   return posts.map((post) => ({
     ...post,
+    stateCode: post.stateCode || stateCode,
     title: cleanText(post.title),
     body: cleanText(post.body),
     dmvLocation: post.dmvLocation ? cleanText(post.dmvLocation) : undefined,
     city: post.city ? cleanText(post.city) : undefined,
     upvotes: Number.isFinite(post.upvotes) ? post.upvotes : 0,
-    createdAt: post.createdAt || "2026-05-25",
+    createdAt: post.createdAt || new Date().toISOString().slice(0, 10),
   }));
 }
 
-function safeParsePosts(text: string): ExperiencePost[] {
-  const parsed = JSON.parse(extractJson(text)) as { posts?: ExperiencePost[] };
-
-  return normalizePosts(parsed.posts ?? []);
+function safeParseResult(text: string): AiExperienceResult {
+  return JSON.parse(extractJson(text)) as AiExperienceResult;
 }
 
-function buildCacheQuery({
-  searchIntent,
-  stateCode,
-  city,
-}: {
-  searchIntent: string;
-  stateCode?: string | null;
-  city?: string;
-}) {
-  return {
-    query: searchIntent.trim().toLowerCase(),
-    state_code: stateCode ?? null,
-    city: city?.trim().toLowerCase() || null,
-  };
+async function fetchWithTimeout(url: string, timeoutMs: number) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (compatible; DMVExperienceSearch/1.0)",
+      },
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
-async function getCachedExperiences({
-  searchIntent,
-  stateCode,
-  city,
-}: {
-  searchIntent: string;
-  stateCode?: string | null;
-  city?: string;
-}) {
-  const supabase = createSupabaseAdminClient();
+function parseDuckDuckGoResults(html: string): SearchResult[] {
+  const blocks = html.match(/<div class="result[\s\S]*?<\/div>\s*<\/div>/g) ?? [];
 
-  if (!supabase) {
-    return null;
-  }
+  return blocks
+    .map((block) => {
+      const titleMatch = block.match(/class="result__a"[^>]*>([\s\S]*?)<\/a>/);
+      const snippetMatch = block.match(
+        /class="result__snippet"[^>]*>([\s\S]*?)<\/a>|class="result__snippet"[^>]*>([\s\S]*?)<\/div>/,
+      );
 
-  const cacheQuery = buildCacheQuery({ searchIntent, stateCode, city });
-
-  const { data } = await supabase
-    .from("experience_search_cache")
-    .select("result_json")
-    .eq("query", cacheQuery.query)
-    .eq("state_code", cacheQuery.state_code)
-    .eq("city", cacheQuery.city)
-    .gt("expires_at", new Date().toISOString())
-    .maybeSingle();
-
-  if (!data?.result_json) {
-    return null;
-  }
-
-  return data.result_json as CachedExperienceResult;
+      return {
+        title: cleanText(titleMatch?.[1] ?? ""),
+        snippet: cleanText(snippetMatch?.[1] ?? snippetMatch?.[2] ?? ""),
+      };
+    })
+    .filter((result) => result.title || result.snippet)
+    .slice(0, 8);
 }
 
-async function setCachedExperiences({
-  searchIntent,
-  stateCode,
-  city,
-  posts,
-}: {
-  searchIntent: string;
-  stateCode?: string | null;
-  city?: string;
-  posts: ExperiencePost[];
-}) {
-  const supabase = createSupabaseAdminClient();
+async function searchPublicWeb(searchIntent: string) {
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(searchIntent)}`;
+  const response = await fetchWithTimeout(url, 12000);
 
-  if (!supabase) {
-    return;
+  if (!response.ok) {
+    return [];
   }
 
-  const cacheQuery = buildCacheQuery({ searchIntent, stateCode, city });
-
-  await supabase.from("experience_search_cache").insert({
-    query: cacheQuery.query,
-    state_code: cacheQuery.state_code,
-    city: cacheQuery.city,
-    result_json: { posts },
-    provider: "openai_web_search",
-    expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-  });
+  return parseDuckDuckGoResults(await response.text());
 }
 
 export async function POST(request: Request) {
   const body = (await request.json()) as ExperienceSearchRequest;
-  const state = body.stateCode ? getStateByCode(body.stateCode) : undefined;
-  const stateCode = state?.code ?? body.stateCode ?? null;
+  const selectedState = body.stateCode ? getStateByCode(body.stateCode) : undefined;
+  const selectedStateCode = selectedState?.code ?? body.stateCode ?? null;
   const query = body.query?.trim();
-  const city = body.city?.trim();
 
   if (!process.env.OPENAI_API_KEY) {
-    return NextResponse.json(
-      { posts: [], error: "OPENAI_API_KEY is missing." },
-      { status: 500 },
-    );
-  }
-
-  const searchIntent = query
-    ? query
-    : [
-        state ? `${state.name} DMV road test experiences` : "DMV road test experiences",
-        city ? `${city} DMV` : "",
-        "public learner discussion road test parking blind spot examiner",
-      ]
-        .filter(Boolean)
-        .join(" ");
-
-  const cached = await getCachedExperiences({
-    searchIntent,
-    stateCode,
-    city,
-  });
-
-  if (cached) {
     return NextResponse.json({
-      posts: cached.posts,
-      cached: true,
+      posts: [],
+      error: "OPENAI_API_KEY is missing.",
     });
   }
 
-  try {
-    const response = await client.responses.create({
-      model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
-      tools: [{ type: "web_search_preview" }],
-      input: `Search the public web for real DMV learner experiences.
+  const searchIntent =
+    query ||
+    [
+      selectedState ? `${selectedState.name} ${selectedState.code}` : "",
+      "DMV road test experience reddit forum parking examiner failed learner",
+    ]
+      .filter(Boolean)
+      .join(" ");
 
-Search intent:
+  try {
+    const publicResults = await searchPublicWeb(searchIntent);
+
+    if (publicResults.length === 0) {
+      return NextResponse.json({
+        posts: [],
+        error:
+          "No public experience results found yet. Try a specific DMV city, address, or road test issue.",
+      });
+    }
+
+    const response = await client.chat.completions.create({
+      model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
+      temperature: 0.1,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You analyze DMV-related public search snippets. Detect the real US state being searched, then create short experience cards. Return only valid JSON.",
+        },
+        {
+          role: "user",
+          content: `Selected state in app:
+${selectedState ? `${selectedState.name} (${selectedState.code})` : "not selected"}
+
+User search intent:
 ${searchIntent}
 
-Selected state:
-${state ? `${state.name} (${state.code})` : "not selected"}
+Public search snippets:
+${publicResults
+  .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
+  .join("\n\n")}
 
-City/location filter:
-${city || "none"}
+Tasks:
+1. Infer searchedStateCode from the user query and snippets. Use two-letter US state code.
+2. If the query mentions a city/location that clearly belongs to another state, searchedStateCode must be that real state.
+3. Example: Hamden means Connecticut, searchedStateCode CT.
+4. Create 2 to 5 DMV learner experience cards only if snippets are DMV-related.
 
 Rules:
-- Focus on real learner experiences and public discussion patterns.
-- Use public web, Reddit-like/forum discussions, and community reports when available.
-- Do not copy posts word-for-word.
-- Do not include URLs, markdown links, citations, or source links inside title or body.
-- Summarize the useful experience directly inside the body so the user can stay on our site.
-- Body should be 2 to 4 helpful sentences.
-- Include practical details when found: parking type, road conditions, examiner focus, common fail reasons, location impressions.
-- Do not include official DMV rules as experience posts.
-- If there are not enough results, return fewer posts.
-- sourceType must be "public_web" or "reddit_like".
-- topic must be one of: "road_test", "parking", "permit_test", "documents", "general".
-- Return only valid JSON. No markdown.
+- Do not include URLs or citations.
+- Do not copy text word-for-word.
+- Do not force the selected app state onto another state's result.
+- topic must be one of: road_test, parking, permit_test, documents, general.
+- sourceType must be public_web or reddit_like.
+- Return only JSON.
 
 JSON shape:
 {
+  "searchedStateCode": "CT",
+  "searchedCity": "Hamden",
   "posts": [
     {
       "id": "unique-id",
       "title": "short title",
-      "body": "summary written in your own words, no links",
+      "body": "2 to 4 sentence summary",
       "stateCode": "CT",
-      "city": "Bridgeport",
-      "dmvLocation": "Bridgeport DMV",
+      "city": "Hamden",
+      "dmvLocation": "Hamden DMV",
       "topic": "road_test",
       "sourceType": "public_web",
       "upvotes": 0,
-      "createdAt": "2026-05-25"
+      "createdAt": "${new Date().toISOString().slice(0, 10)}"
     }
   ]
 }`,
+        },
+      ],
     });
 
-    const posts = safeParsePosts(response.output_text);
+    const content = response.choices[0]?.message.content ?? "";
+    const result = safeParseResult(content);
+    const searchedStateCode = result.searchedStateCode?.trim().toUpperCase() || null;
 
-    await setCachedExperiences({
-      searchIntent,
-      stateCode,
-      city,
-      posts,
-    });
+    if (
+      selectedStateCode &&
+      searchedStateCode &&
+      searchedStateCode !== selectedStateCode
+    ) {
+      return NextResponse.json({
+        posts: [],
+        notice: `This search looks like it belongs to ${searchedStateCode}, not ${selectedStateCode}. Please change your selected state or search a city/location in ${selectedStateCode}.`,
+        suggestedStateCode: searchedStateCode,
+      });
+    }
+
+    const finalStateCode = searchedStateCode ?? selectedStateCode ?? "US";
+    const posts = normalizePosts(result.posts ?? [], finalStateCode);
 
     return NextResponse.json({
       posts,
+      searchedStateCode,
       cached: false,
     });
   } catch {
-    return NextResponse.json(
-      {
-        posts: [],
-        error:
-          "Could not search public experiences right now. Try a more specific state, city, or DMV location.",
-      },
-      { status: 500 },
-    );
+    return NextResponse.json({
+      posts: [],
+      error:
+        "Live search failed. Try a specific DMV city, DMV address, or road test issue.",
+    });
   }
 }

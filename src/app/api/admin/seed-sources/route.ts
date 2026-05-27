@@ -1,6 +1,9 @@
 ﻿import { NextResponse } from "next/server";
 import { states } from "@/config/states";
-import { createSupabaseAdminClient } from "@/lib/supabase";
+import {
+  createSupabaseAdminClient,
+  getSupabaseDebugInfo,
+} from "@/lib/supabase";
 
 type OfficialSourceSeed = {
   state_code: string;
@@ -52,17 +55,11 @@ function getErrorMessage(error: unknown) {
 }
 
 export async function GET() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-
   return NextResponse.json({
     ok: true,
     hasSeedSecret: Boolean(process.env.ADMIN_SEED_SECRET),
     seedSecretLength: process.env.ADMIN_SEED_SECRET?.length ?? 0,
-    hasSupabaseUrl: Boolean(supabaseUrl),
-    supabaseUrlHost: supabaseUrl ? new URL(supabaseUrl).host : null,
-    hasServiceRole: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
-    serviceRoleStartsWithEyJ:
-      process.env.SUPABASE_SERVICE_ROLE_KEY?.startsWith("eyJ") ?? false,
+    ...getSupabaseDebugInfo(),
   });
 }
 
@@ -87,7 +84,10 @@ export async function POST(request: Request) {
 
     if (!supabase) {
       return NextResponse.json(
-        { error: "Supabase admin config is missing." },
+        {
+          error: "Supabase admin config is missing.",
+          ...getSupabaseDebugInfo(),
+        },
         { status: 500 },
       );
     }
@@ -109,6 +109,7 @@ export async function POST(request: Request) {
             step: "check_existing",
             sourceUrl: source.url,
             error: existingResult.error.message,
+            ...getSupabaseDebugInfo(),
           },
           { status: 500 },
         );
@@ -119,7 +120,9 @@ export async function POST(request: Request) {
         continue;
       }
 
-      const insertResult = await supabase.from("official_sources").insert(source);
+      const insertResult = await supabase
+        .from("official_sources")
+        .insert(source);
 
       if (insertResult.error) {
         return NextResponse.json(
@@ -129,6 +132,7 @@ export async function POST(request: Request) {
             error: insertResult.error.message,
             inserted,
             skipped,
+            ...getSupabaseDebugInfo(),
           },
           { status: 500 },
         );
@@ -148,6 +152,7 @@ export async function POST(request: Request) {
       {
         step: "unexpected_exception",
         error: getErrorMessage(error),
+        ...getSupabaseDebugInfo(),
       },
       { status: 500 },
     );

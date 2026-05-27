@@ -52,17 +52,9 @@ export function ExperienceCard({ post }: { post: ExperiencePost }) {
           </div>
 
           <h2 className="mt-3 text-xl font-bold text-slate-950">{post.title}</h2>
-          <p className="mt-3 text-sm leading-7 text-slate-600">{post.body}</p>
-
-          <div className="mt-4 flex flex-wrap items-center gap-3 text-xs font-semibold text-slate-400">
-            <span>{post.sourceType.replace("_", " ")}</span>
-            <span>-</span>
-            <span>{post.createdAt}</span>
-            <span>-</span>
-            <span>{post.upvotes} helpful</span>
-          </div>
-        </div>
+          <p className="mt-3 text-sm leading-7 text-slate-600">{post.body}</p>        </div>
       </div>
     </article>
   );
 }
+

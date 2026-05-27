@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExperienceCard } from "@/components/experiences/ExperienceCard";
 import { ExperienceComposer } from "@/components/experiences/ExperienceComposer";
 import { useSelectedState } from "@/components/states/SelectedStateContext";
@@ -9,182 +9,176 @@ import type { ExperiencePost } from "@/types/experience";
 type ExperienceResponse = {
   posts: ExperiencePost[];
   error?: string;
+  notice?: string;
+  suggestedStateCode?: string | null;
 };
 
-type CacheEntry = {
-  posts: ExperiencePost[];
-  status: string;
-};
+type LoadingKind = "page" | "search" | null;
 
-function cacheKey({
-  query,
-  stateCode,
-  city,
-}: {
-  query?: string;
-  stateCode?: string | null;
-  city?: string;
-}) {
-  return JSON.stringify({
-    query: query?.trim().toLowerCase() ?? "",
-    stateCode: stateCode ?? "",
-    city: city?.trim().toLowerCase() ?? "",
-  });
+function defaultSearchForState(stateCode: string | null) {
+  return stateCode
+    ? `${stateCode} DMV road test experience reddit forum parking examiner failed learner`
+    : "DMV road test experience reddit forum parking examiner failed learner";
 }
 
 export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[] }) {
   const { selectedStateCode } = useSelectedState();
-  const didAutoLoadRef = useRef<string | null>(null);
-  const cacheRef = useRef<Map<string, CacheEntry>>(new Map());
+  const loadedStateRef = useRef<string | null>(null);
+
   const [searchQuery, setSearchQuery] = useState("");
-  const [cityFilter, setCityFilter] = useState("");
   const [posts, setPosts] = useState<ExperiencePost[]>(initialPosts);
-  const [isLoading, setIsLoading] = useState(false);
-  const [hasLoaded, setHasLoaded] = useState(false);
-  const [status, setStatus] = useState("Loading selected state experiences...");
+  const [loadingKind, setLoadingKind] = useState<LoadingKind>(null);
+  const [hasLoaded, setHasLoaded] = useState(initialPosts.length > 0);
+  const [status, setStatus] = useState("Choose a state or search DMV experiences.");
+  const [notice, setNotice] = useState<string | null>(null);
+  const [suggestedStateCode, setSuggestedStateCode] = useState<string | null>(null);
 
-  const cities = useMemo(() => {
-    return Array.from(
-      new Set(
-        posts
-          .filter((post) => !selectedStateCode || post.stateCode === selectedStateCode)
-          .map((post) => post.city)
-          .filter((city): city is string => Boolean(city)),
-      ),
-    );
-  }, [posts, selectedStateCode]);
-
-  async function fetchExperiences({
-    query,
-    stateCode,
-    city,
-  }: {
-    query?: string;
-    stateCode?: string | null;
-    city?: string;
-  }) {
-    const key = cacheKey({ query, stateCode, city });
-    const cached = cacheRef.current.get(key);
-
-    if (cached) {
-      setPosts(cached.posts);
-      setStatus(`${cached.status} Loaded from session cache.`);
-      setHasLoaded(true);
-      return;
+  const searchLabel = useMemo(() => {
+    if (!selectedStateCode) {
+      return "Choose a state first, or search any DMV city/address.";
     }
 
-    setIsLoading(true);
-    setStatus("Searching public DMV discussions...");
-
-    try {
-      const response = await fetch("/api/experiences", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          query,
-          stateCode,
-          city,
-        }),
-      });
-
-      const data = (await response.json()) as ExperienceResponse;
-      const nextStatus =
-        data.error ??
-        `Updated with ${data.posts.length} DMV experience summaries.`;
-
-      cacheRef.current.set(key, {
-        posts: data.posts,
-        status: nextStatus,
-      });
-
-      setPosts(data.posts);
-      setStatus(nextStatus);
-    } finally {
-      setHasLoaded(true);
-      setIsLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    if (!selectedStateCode || didAutoLoadRef.current === selectedStateCode) {
-      return;
-    }
-
-    didAutoLoadRef.current = selectedStateCode;
-    setPosts([]);
-    setHasLoaded(false);
-    setStatus("Loading selected state experiences...");
-
-    const timer = window.setTimeout(() => {
-      fetchExperiences({
-        query: `${selectedStateCode} DMV road test experiences parking examiner`,
-        stateCode: selectedStateCode,
-      });
-    }, 300);
-
-    return () => window.clearTimeout(timer);
+    return `Default state: ${selectedStateCode}. You can still search another state by typing it.`;
   }, [selectedStateCode]);
 
-  function searchExperiences() {
-    const query = searchQuery.trim();
+  const fetchExperiences = useCallback(
+    async (query: string, loadingType: LoadingKind) => {
+      setLoadingKind(loadingType);
+      setHasLoaded(false);
+      setNotice(null);
+      setSuggestedStateCode(null);
 
-    fetchExperiences({
-      query: query || `${selectedStateCode ?? ""} DMV road test experiences`,
-      stateCode: selectedStateCode,
-      city: cityFilter,
-    });
+      try {
+        const response = await fetch("/api/experiences", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            query,
+            stateCode: selectedStateCode,
+          }),
+        });
+
+        const data = (await response.json()) as ExperienceResponse;
+
+        setPosts(data.posts);
+        setNotice(data.notice ?? null);
+        setSuggestedStateCode(data.suggestedStateCode ?? null);
+
+        if (data.suggestedStateCode) {
+          window.dispatchEvent(new Event("highlight-change-state"));
+        }
+
+        setStatus(
+          data.error ??
+            (data.posts.length > 0
+              ? `Found ${data.posts.length} real DMV experience summaries.`
+              : "No real experience summaries found. Try a city, DMV address, or road test issue."),
+        );
+      } catch {
+        setPosts([]);
+        setStatus("Live search failed. Try a specific DMV city, address, or road test issue.");
+      } finally {
+        setHasLoaded(true);
+        setLoadingKind(null);
+      }
+    },
+    [selectedStateCode],
+  );
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (!selectedStateCode) {
+        setPosts([]);
+        setHasLoaded(true);
+        setStatus("Choose a state first, then this page will load DMV experiences.");
+        return;
+      }
+
+      if (loadedStateRef.current === selectedStateCode) {
+        return;
+      }
+
+      loadedStateRef.current = selectedStateCode;
+      setPosts([]);
+      setStatus("Loading real DMV learner experiences for this state...");
+
+      fetchExperiences(defaultSearchForState(selectedStateCode), "page");
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [fetchExperiences, selectedStateCode]);
+
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const rawQuery = searchQuery.trim();
+
+    const query =
+      rawQuery.length <= 12 && selectedStateCode
+        ? `${selectedStateCode} DMV road test ${rawQuery || "experience"} parking examiner reddit forum`
+        : rawQuery || defaultSearchForState(selectedStateCode);
+
+    setPosts([]);
+    setStatus("Searching public DMV discussions...");
+    fetchExperiences(query, "search");
   }
 
-  const showLoadingCard = isLoading || (!hasLoaded && posts.length === 0);
-  const showEmptyCard = !isLoading && hasLoaded && posts.length === 0;
+  const isPageLoading = loadingKind === "page";
+  const isSearchLoading = loadingKind === "search";
+  const showLoadingCard = isPageLoading || isSearchLoading || (!hasLoaded && posts.length === 0);
+  const showEmptyCard = !loadingKind && hasLoaded && posts.length === 0;
 
   return (
     <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_360px]">
       <div className="space-y-5">
         <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <label className="text-sm font-bold text-slate-700">
-            Search real DMV experiences
-          </label>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <label className="text-sm font-bold text-slate-700">
+                Search real DMV experiences
+              </label>
+              <p className="mt-1 text-xs font-semibold text-slate-500">
+                Type like Google: city, DMV address, road test issue, parking, or examiner concern.
+              </p>
+            </div>
 
-          <div className="mt-3 flex flex-col gap-3 sm:flex-row">
+            <span className="w-fit rounded-full bg-sky-50 px-3 py-1 text-xs font-black text-sky-700">
+              {selectedStateCode ? `State: ${selectedStateCode}` : "No state selected"}
+            </span>
+          </div>
+
+          <form onSubmit={handleSubmit} className="mt-4 flex flex-col gap-3 sm:flex-row">
             <input
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Try: Hamden CT road test parallel parking, Bridgeport DMV reverse parking"
+              placeholder="Example: Hamden CT DMV road test parallel parking"
               className="min-w-0 flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-5 py-4 text-sm font-semibold outline-none transition placeholder:text-slate-400 focus:border-sky-300 focus:bg-white focus:ring-4 focus:ring-sky-100"
             />
 
             <button
-              onClick={searchExperiences}
-              disabled={isLoading}
-              className="rounded-2xl bg-slate-950 px-5 py-4 text-sm font-black text-white shadow-lg shadow-slate-900/10 disabled:bg-slate-300"
+              type="submit"
+              disabled={isSearchLoading}
+              className="rounded-2xl bg-slate-950 px-5 py-4 text-sm font-black text-white shadow-lg shadow-slate-900/10 transition hover:-translate-y-0.5 disabled:bg-slate-300"
             >
-              {isLoading ? "Searching..." : "Search"}
+              {isSearchLoading ? "Searching..." : "Search"}
             </button>
-          </div>
+          </form>
 
-          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-            <select
-              value={cityFilter}
-              onChange={(event) => setCityFilter(event.target.value)}
-              className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 outline-none"
-            >
-              <option value="">All cities / locations</option>
-              {cities.map((city) => (
-                <option key={city} value={city}>
-                  {city}
-                </option>
-              ))}
-            </select>
-
-            <p className="text-xs font-semibold text-slate-500">
-              {selectedStateCode
-                ? `Default state: ${selectedStateCode}. Search can still find DMV experiences from any state.`
-                : "Choose a state or search any DMV location."}
-            </p>
-          </div>
+          <p className="mt-3 text-xs leading-5 text-slate-500">{searchLabel}</p>
+          {notice && (
+            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold leading-6 text-amber-900">
+              <p>{notice}</p>
+              <button
+                type="button"
+                onClick={() => window.dispatchEvent(new Event("open-state-picker"))}
+                className="mt-3 rounded-2xl bg-amber-900 px-4 py-2 text-xs font-black text-white"
+              >
+                {suggestedStateCode ? `Change state to ${suggestedStateCode}` : "Change State"}
+              </button>
+            </div>
+          )}
 
           <p className="mt-3 text-xs leading-5 text-slate-500">{status}</p>
         </section>
@@ -208,7 +202,7 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
 
         {showEmptyCard && (
           <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm font-semibold text-slate-500">
-            No live experience summaries found yet. Try a more specific DMV location.
+            No live experience summaries found yet. Try a DMV city, road test location, or the issue you are worried about.
           </div>
         )}
       </div>
@@ -217,3 +211,5 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
     </div>
   );
 }
+
+
