@@ -106,19 +106,19 @@ export async function POST(request: Request) {
     for (const [signCode, fileName] of Object.entries(signFiles)) {
       const publicUrl = await uploadFile(supabase, fileName);
 
-      const { count, error } = await supabase
+      const { data, error } = await supabase
         .from("practice_questions")
         .update({ image_url: publicUrl })
         .eq("mode", "road_signs")
         .eq("sign_code", signCode)
-        .select("id", { count: "exact", head: true });
+        .select("id");
 
       if (error) {
         throw new Error(`DB update failed for ${signCode}: ${error.message}`);
       }
 
       uploaded += 1;
-      updatedRows += count ?? 0;
+      updatedRows += data?.length ?? 0;
 
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
@@ -144,3 +144,4 @@ export async function GET() {
     signs: Object.keys(signFiles).length,
   });
 }
+
