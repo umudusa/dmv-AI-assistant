@@ -1,5 +1,4 @@
-export type PracticeMode =
-  | "practice"
+﻿export type PracticeMode =
   | "real_exam"
   | "road_signs"
   | "mistake_review";
@@ -21,4 +20,6 @@ export type PracticeQuestion = {
   choices: string[];
   correctAnswerIndex: number;
   explanation: string;
+  imageUrl?: string;
 };
+

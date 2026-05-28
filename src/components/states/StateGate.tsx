@@ -1,10 +1,15 @@
 ﻿"use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
 import { states } from "@/config/states";
 import { SelectedStateProvider } from "@/components/states/SelectedStateContext";
 
+const sessionStateKey = "dmv_selected_state_session";
+
 export function StateGate({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [loading, setLoading] = useState(true);
   const [selectedState, setSelectedState] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -26,10 +31,27 @@ export function StateGate({ children }: { children: React.ReactNode }) {
   }, [searchQuery]);
 
   useEffect(() => {
+    const shouldResetState =
+      pathname === "/" || searchParams.get("resetState") === "1";
+
+    if (shouldResetState) {
+      window.sessionStorage.removeItem(sessionStateKey);
+    }
+
+    const savedState = shouldResetState
+      ? null
+      : window.sessionStorage.getItem(sessionStateKey);
+
     const timer = window.setTimeout(() => {
+      if (savedState) {
+        setSelectedState(savedState);
+      } else {
+        setSelectedState(null);
+      }
+
       setLoading(false);
-      setPickerOpen(true);
-    }, 1400);
+      setPickerOpen(!savedState);
+    }, 900);
 
     const openPicker = () => setPickerOpen(true);
     window.addEventListener("open-state-picker", openPicker);
@@ -38,9 +60,10 @@ export function StateGate({ children }: { children: React.ReactNode }) {
       window.clearTimeout(timer);
       window.removeEventListener("open-state-picker", openPicker);
     };
-  }, []);
+  }, [pathname, searchParams]);
 
   function chooseState(code: string) {
+    window.sessionStorage.setItem(sessionStateKey, code);
     setSelectedState(code);
     setPickerOpen(false);
     setSearchQuery("");
@@ -90,13 +113,17 @@ export function StateGate({ children }: { children: React.ReactNode }) {
         )}
 
         {!loading && (pickerOpen || !selectedState) && (
-          <div onMouseDown={closePicker} className="fixed inset-0 z-[180] flex cursor-default items-end justify-center overflow-hidden bg-slate-950/35 px-3 pb-3 pt-8 text-left backdrop-blur-xl sm:items-center sm:px-4 sm:py-6">
+          <div
+            onMouseDown={closePicker}
+            className="fixed inset-0 z-[180] flex cursor-default items-end justify-center overflow-hidden bg-slate-950/35 px-3 pb-3 pt-8 text-left backdrop-blur-xl sm:items-center sm:px-4 sm:py-6"
+          >
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(14,165,233,0.20),transparent_30%),radial-gradient(circle_at_80%_35%,rgba(16,185,129,0.18),transparent_30%)]" />
 
             <div
               role="dialog"
               aria-modal="true"
-              aria-label="Choose your state" onMouseDown={(event) => event.stopPropagation()}
+              aria-label="Choose your state"
+              onMouseDown={(event) => event.stopPropagation()}
               className="relative flex max-h-[92vh] w-full max-w-3xl animate-[stateModalIn_0.6s_ease-out] cursor-auto flex-col overflow-hidden rounded-[1.5rem] border border-white/30 bg-white/92 p-4 shadow-2xl shadow-slate-950/25 backdrop-blur-2xl sm:rounded-[2rem] sm:p-7"
             >
               {canClosePicker && (

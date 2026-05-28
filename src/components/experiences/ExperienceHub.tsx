@@ -27,6 +27,8 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
 
   const [searchQuery, setSearchQuery] = useState("");
   const [posts, setPosts] = useState<ExperiencePost[]>(initialPosts);
+  const [visibleCount, setVisibleCount] = useState(3);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [loadingKind, setLoadingKind] = useState<LoadingKind>(null);
   const [hasLoaded, setHasLoaded] = useState(initialPosts.length > 0);
   const [status, setStatus] = useState("Choose a state or search DMV experiences.");
@@ -63,6 +65,7 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
         const data = (await response.json()) as ExperienceResponse;
 
         setPosts(data.posts);
+        setVisibleCount(3);
         setNotice(data.notice ?? null);
         setSuggestedStateCode(data.suggestedStateCode ?? null);
 
@@ -78,6 +81,8 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
         );
       } catch {
         setPosts([]);
+    setVisibleCount(3);
+        setVisibleCount(3);
         setStatus("Live search failed. Try a specific DMV city, address, or road test issue.");
       } finally {
         setHasLoaded(true);
@@ -91,6 +96,8 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
     const timer = window.setTimeout(() => {
       if (!selectedStateCode) {
         setPosts([]);
+    setVisibleCount(3);
+        setVisibleCount(3);
         setHasLoaded(true);
         setStatus("Choose a state first, then this page will load DMV experiences.");
         return;
@@ -102,6 +109,7 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
 
       loadedStateRef.current = selectedStateCode;
       setPosts([]);
+    setVisibleCount(3);
       setStatus("Loading real DMV learner experiences for this state...");
 
       fetchExperiences(defaultSearchForState(selectedStateCode), "page");
@@ -121,6 +129,7 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
         : rawQuery || defaultSearchForState(selectedStateCode);
 
     setPosts([]);
+    setVisibleCount(3);
     setStatus("Searching public DMV discussions...");
     fetchExperiences(query, "search");
   }
@@ -129,6 +138,21 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
   const isSearchLoading = loadingKind === "search";
   const showLoadingCard = isPageLoading || isSearchLoading || (!hasLoaded && posts.length === 0);
   const showEmptyCard = !loadingKind && hasLoaded && posts.length === 0;
+
+  async function loadMoreExperiences() {
+    setIsLoadingMore(true);
+
+    try {
+      if (posts.length <= visibleCount) {
+        const query = searchQuery.trim() || defaultSearchForState(selectedStateCode);
+        await fetchExperiences(query, null);
+      }
+
+      setVisibleCount((count) => count + 3);
+    } finally {
+      window.setTimeout(() => setIsLoadingMore(false), 350);
+    }
+  }
 
   return (
     <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_360px]">
@@ -183,6 +207,7 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
           <p className="mt-3 text-xs leading-5 text-slate-500">{status}</p>
         </section>
 
+        <div className="max-h-[720px] space-y-5 overflow-y-auto pr-2">
         {showLoadingCard && (
           <div className="rounded-2xl border border-sky-100 bg-white p-8 text-center shadow-sm">
             <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-3xl bg-sky-100 text-xs font-black text-sky-700 shadow-sm">
@@ -198,18 +223,41 @@ export function ExperienceHub({ posts: initialPosts }: { posts: ExperiencePost[]
         )}
 
         {!showLoadingCard &&
-          posts.map((post) => <ExperienceCard key={post.id} post={post} />)}
+          posts
+            .slice(0, visibleCount)
+            .map((post) => <ExperienceCard key={post.id} post={post} />)}
+
+        {!showLoadingCard && posts.length > visibleCount && (
+          <button
+            type="button"
+            onClick={loadMoreExperiences}
+            disabled={isLoadingMore}
+            className="w-full rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm font-black text-slate-700 shadow-sm transition hover:border-sky-300 hover:text-sky-700 disabled:text-slate-400"
+          >
+            {isLoadingMore ? "Loading more..." : "More experiences"}
+          </button>
+        )}
+
+        {isLoadingMore && (
+          <div className="rounded-2xl border border-sky-100 bg-white p-4 text-center text-xs font-black text-sky-700 shadow-sm">
+            Searching for more DMV experiences...
+          </div>
+        )}
 
         {showEmptyCard && (
           <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm font-semibold text-slate-500">
             No live experience summaries found yet. Try a DMV city, road test location, or the issue you are worried about.
           </div>
         )}
+        </div>
       </div>
 
       <ExperienceComposer />
     </div>
   );
 }
+
+
+
 
 

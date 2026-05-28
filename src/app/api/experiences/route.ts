@@ -1,6 +1,7 @@
 ﻿import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { getStateByCode } from "@/config/states";
+import { createSupabaseAdminClient } from "@/lib/supabase";
 import type { ExperiencePost } from "@/types/experience";
 
 const client = new OpenAI({
@@ -21,6 +22,11 @@ type AiExperienceResult = {
   searchedStateCode?: string | null;
   searchedCity?: string | null;
   posts?: ExperiencePost[];
+};
+
+type CachedExperienceResult = {
+  posts: ExperiencePost[];
+  searchedStateCode?: string | null;
 };
 
 function cleanText(text: string) {
@@ -51,6 +57,21 @@ function extractJson(text: string) {
   }
 
   return cleaned.slice(start, end + 1);
+}
+
+function uniquePosts(posts: ExperiencePost[]) {
+  const seen = new Set<string>();
+
+  return posts.filter((post) => {
+    const key = post.id || `${post.stateCode}-${post.title}-${post.dmvLocation ?? ""}`;
+
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
 }
 
 function normalizePosts(posts: ExperiencePost[], stateCode: string) {
@@ -106,6 +127,87 @@ function parseDuckDuckGoResults(html: string): SearchResult[] {
     .slice(0, 8);
 }
 
+function rowToExperiencePost(row: {
+  id: string;
+  title: string;
+  body: string;
+  state_code: string;
+  city: string | null;
+  dmv_location: string | null;
+  topic: ExperiencePost["topic"];
+  source_type: ExperiencePost["sourceType"];
+  upvotes: number;
+  created_at: string;
+}): ExperiencePost {
+  return {
+    id: row.id,
+    title: row.title,
+    body: row.body,
+    stateCode: row.state_code,
+    city: row.city ?? undefined,
+    dmvLocation: row.dmv_location ?? undefined,
+    topic: row.topic,
+    sourceType: row.source_type,
+    upvotes: row.upvotes,
+    createdAt: row.created_at.slice(0, 10),
+  };
+}
+
+function queryWords(query: string) {
+  return query
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length >= 3)
+    .slice(0, 6);
+}
+
+async function searchSubmittedExperiences({
+  searchIntent,
+  stateCode,
+}: {
+  searchIntent: string;
+  stateCode?: string | null;
+}) {
+  const supabase = createSupabaseAdminClient();
+
+  if (!supabase) {
+    return [];
+  }
+
+  const words = queryWords(searchIntent);
+  const orParts = words.flatMap((word) => [
+    `title.ilike.%${word}%`,
+    `body.ilike.%${word}%`,
+    `dmv_location.ilike.%${word}%`,
+    `city.ilike.%${word}%`,
+  ]);
+
+  if (orParts.length === 0) {
+    return [];
+  }
+
+  try {
+    let query = supabase
+      .from("experience_posts")
+      .select("id,title,body,state_code,city,dmv_location,topic,source_type,upvotes,created_at")
+      .in("moderation_status", ["pending", "approved"])
+      .or(orParts.join(","))
+      .order("created_at", { ascending: false })
+      .limit(5);
+
+    if (stateCode) {
+      query = query.eq("state_code", stateCode);
+    }
+
+    const { data } = await query;
+
+    return (data ?? []).map(rowToExperiencePost);
+  } catch {
+    return [];
+  }
+}
+
 async function searchPublicWeb(searchIntent: string) {
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(searchIntent)}`;
   const response = await fetchWithTimeout(url, 12000);
@@ -115,6 +217,82 @@ async function searchPublicWeb(searchIntent: string) {
   }
 
   return parseDuckDuckGoResults(await response.text());
+}
+
+function cacheKey(searchIntent: string, stateCode?: string | null) {
+  return {
+    query: searchIntent.trim().toLowerCase(),
+    stateCode: stateCode ?? null,
+  };
+}
+
+async function getCachedExperiences(searchIntent: string, stateCode?: string | null) {
+  const supabase = createSupabaseAdminClient();
+
+  if (!supabase) {
+    return null;
+  }
+
+  const key = cacheKey(searchIntent, stateCode);
+
+  try {
+    let query = supabase
+      .from("experience_search_cache")
+      .select("result_json")
+      .eq("query", key.query)
+      .gt("expires_at", new Date().toISOString());
+
+    query = key.stateCode
+      ? query.eq("state_code", key.stateCode)
+      : query.is("state_code", null);
+
+    const { data } = await query.maybeSingle();
+
+    if (!data?.result_json) {
+      return null;
+    }
+
+    return data.result_json as CachedExperienceResult;
+  } catch {
+    return null;
+  }
+}
+
+async function setCachedExperiences({
+  searchIntent,
+  stateCode,
+  posts,
+  searchedStateCode,
+}: {
+  searchIntent: string;
+  stateCode?: string | null;
+  posts: ExperiencePost[];
+  searchedStateCode?: string | null;
+}) {
+  if (posts.length === 0) {
+    return;
+  }
+
+  const supabase = createSupabaseAdminClient();
+
+  if (!supabase) {
+    return;
+  }
+
+  const key = cacheKey(searchIntent, stateCode);
+
+  try {
+    await supabase.from("experience_search_cache").insert({
+      query: key.query,
+      state_code: key.stateCode,
+      city: null,
+      result_json: { posts, searchedStateCode },
+      provider: "duckduckgo_openai",
+      expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+  } catch {
+    // Cache should never block the experience search.
+  }
 }
 
 export async function POST(request: Request) {
@@ -138,15 +316,31 @@ export async function POST(request: Request) {
     ]
       .filter(Boolean)
       .join(" ");
+  const submittedPosts = await searchSubmittedExperiences({
+    searchIntent,
+    stateCode: selectedStateCode,
+  });
+
+  const cached = await getCachedExperiences(searchIntent, selectedStateCode);
+
+  if (cached?.posts?.length) {
+    return NextResponse.json({
+      posts: uniquePosts([...submittedPosts, ...cached.posts]).slice(0, 8),
+      searchedStateCode: cached.searchedStateCode ?? null,
+      cached: true,
+    });
+  }
 
   try {
     const publicResults = await searchPublicWeb(searchIntent);
 
     if (publicResults.length === 0) {
       return NextResponse.json({
-        posts: [],
+        posts: submittedPosts,
         error:
-          "No public experience results found yet. Try a specific DMV city, address, or road test issue.",
+          submittedPosts.length > 0
+            ? undefined
+            : "No public experience results found yet. Try a specific DMV city, address, or road test issue.",
       });
     }
 
@@ -228,6 +422,13 @@ JSON shape:
     const finalStateCode = searchedStateCode ?? selectedStateCode ?? "US";
     const posts = normalizePosts(result.posts ?? [], finalStateCode);
 
+    await setCachedExperiences({
+      searchIntent,
+      stateCode: selectedStateCode,
+      posts,
+      searchedStateCode,
+    });
+
     return NextResponse.json({
       posts,
       searchedStateCode,
@@ -241,3 +442,11 @@ JSON shape:
     });
   }
 }
+
+
+
+
+
+
+
+
