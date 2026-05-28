@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { states } from "@/config/states";
 import { SelectedStateProvider } from "@/components/states/SelectedStateContext";
 
@@ -9,7 +9,7 @@ const sessionStateKey = "dmv_selected_state_session";
 
 export function StateGate({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const searchParams = useSearchParams();
+
   const [loading, setLoading] = useState(true);
   const [selectedState, setSelectedState] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -32,7 +32,8 @@ export function StateGate({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const shouldResetState =
-      pathname === "/" || searchParams.get("resetState") === "1";
+      pathname === "/" ||
+      new URLSearchParams(window.location.search).get("resetState") === "1";
 
     if (shouldResetState) {
       window.sessionStorage.removeItem(sessionStateKey);
@@ -60,7 +61,7 @@ export function StateGate({ children }: { children: React.ReactNode }) {
       window.clearTimeout(timer);
       window.removeEventListener("open-state-picker", openPicker);
     };
-  }, [pathname, searchParams]);
+  }, [pathname]);
 
   function chooseState(code: string) {
     window.sessionStorage.setItem(sessionStateKey, code);
@@ -224,5 +225,6 @@ export function StateGate({ children }: { children: React.ReactNode }) {
     </SelectedStateProvider>
   );
 }
+
 
 
